@@ -1,0 +1,296 @@
+import numpy as np
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+from time import time
+
+class HestonAsianOption:
+    def __init__(self, S0, r, T, K, V0, kappa, theta, xi, rho, N, M, scheme='euler'):
+        self.S0 = S0
+        self.r = r
+        self.T = T
+        self.K = K
+        self.V0 = V0
+        self.kappa = kappa
+        self.theta = theta
+        self.xi = xi
+        self.rho = rho
+        self.N = N
+        self.M = M
+        self.dt = T / N
+        self.scheme = scheme
+        
+    def generate_paths(self):
+        """Generate stock price and variance paths using either Euler or Milstein discretization"""       
+        
+        S = np.zeros((self.M, self.N + 1))
+        v = np.zeros((self.M, self.N + 1))
+        S[:, 0] = self.S0
+        v[:, 0] = self.V0
+
+        dt = self.dt
+        sqrt_dt = np.sqrt(dt)
+        
+        # Correlated Brownian increments
+        z1 = np.random.normal(0, 1, (self.M, self.N))
+        self.z1 = z1  # Store for GBM paths
+        z2 = self.rho * z1 + np.sqrt(1 - self.rho**2) * np.random.normal(0, 1, (self.M, self.N))
+        
+        # Simulate paths
+        for t in range(self.N):
+            # Non negative variance (truncation scheme)
+            v[:, t] = np.maximum(v[:, t], 0)
+
+            # Update variance 
+            if self.scheme == 'euler':
+                v[:, t+1] = v[:, t] + self.kappa * (self.theta - v[:, t]) * dt + self.xi * np.sqrt(v[:, t]) * sqrt_dt * z2[:, t]
+            elif self.scheme == 'milstein':
+                v[:, t+1] = v[:, t] + self.kappa * (self.theta - v[:, t]) * dt + self.xi * np.sqrt(v[:, t]) * sqrt_dt * z2[:, t] + \
+                            0.25 * self.xi**2 * dt * (z2[:, t]**2 - 1)
+            # Update stock price
+            S[:, t+1] = S[:, t] * np.exp((self.r - 0.5 * v[:, t]) * dt + np.sqrt(v[:, t]) * sqrt_dt * z1[:, t])
+            
+        
+        return S, v
+
+    def generate_gbm_paths(self, sigma):
+        """Generate GBM paths using the same random numbers as Heston paths"""
+        dt = self.dt
+        sqrt_dt = np.sqrt(dt)
+        
+        # Initialize array
+        S_gbm = np.zeros((self.M, self.N + 1))
+        
+        # Set initial value
+        S_gbm[:, 0] = self.S0
+        
+        # Use the same random numbers as in Heston simulation
+        for t in range(self.N):
+            S_gbm[:, t+1] = S_gbm[:, t] * np.exp((self.r - 0.5 * sigma**2) * dt + sigma * sqrt_dt * self.z1[:, t])
+
+        return S_gbm
+    
+    def price_arithmetic_asian_option(self):
+        """Price arithmetic average Asian call option"""
+        start_time = time()
+        
+        S, _ = self.generate_paths()
+        
+        # Calculate arithmetic average for each path
+        arith_avg = np.mean(S[:, 1:], axis=1)  # Exclude initial price
+        
+        # Calculate payoffs
+        payoffs = np.maximum(arith_avg - self.K, 0)
+        
+        # Calculate option price
+        option_price = np.exp(-self.r * self.T) * np.mean(payoffs)
+        
+        # Calculate standard error
+        std_error = np.exp(-self.r * self.T) * np.std(payoffs) / np.sqrt(self.M)
+        
+        end_time = time()
+        computation_time = end_time - start_time
+        
+        return option_price, std_error, computation_time
+
+    def analytical_geometric_asian_price(self, sigma):
+            """Task 2: Analytical pricing formula for geometric-average Asian call under BS model"""
+            N = self.N
+            
+            # Modified parameters for the geometric Asian option
+            # Formula based on Kemna & Vorst (1990)
+            sigma_adj = sigma * np.sqrt((2 * N + 1) / (6 * (N + 1)))
+            r_adj = self.r - 0.5 * sigma**2 + sigma_adj**2 / 2
+            
+            # Calculate d1 and d2
+            d1 = (np.log(self.S0 / self.K) + (r_adj + 0.5 * sigma_adj**2) * self.T) / (sigma_adj * np.sqrt(self.T))
+            # d2 = d1 - sigma_adj * np.sqrt(self.T)
+            d2 = (np.log(self.S0 / self.K) + (r_adj - 0.5 * sigma_adj**2) * self.T) / (sigma_adj * np.sqrt(self.T))
+            
+            # Black-Scholes formula for geometric Asian option
+            price = self.S0 * np.exp((r_adj - self.r) * self.T) * norm.cdf(d1) - self.K * np.exp(-self.r * self.T) * norm.cdf(d2)
+            
+            return price
+
+    def verify_with_gbm(self):
+            """Verify implementation by setting xi=0 (reduces to GBM) and comparing with BS model"""
+            # Save original xi
+            original_xi = self.xi
+            
+            # Set xi to 0 (reducing Heston to GBM)
+            self.xi = 0
+            
+            # Price using Heston implementation
+            heston_price, heston_std_error, _ = self.price_arithmetic_asian_option()
+            
+            # Restore original xi
+            self.xi = original_xi
+            
+            return heston_price, heston_std_error
+    
+    def compare_schemes(self):
+        """Compare Euler and Milstein schemes"""
+        # Save original scheme
+        original_scheme = self.scheme
+        
+        # Price using Euler scheme
+        self.scheme = 'euler'
+        euler_start_time = time()
+        euler_price, euler_std_error, _ = self.price_arithmetic_asian_option()
+        euler_time = time() - euler_start_time
+        
+        # Price using Milstein scheme
+        self.scheme = 'milstein'
+        milstein_start_time = time()
+        milstein_price, milstein_std_error, _ = self.price_arithmetic_asian_option()
+        milstein_time = time() - milstein_start_time
+        
+        # Restore original scheme
+        self.scheme = original_scheme
+        
+        return {
+            'euler': {
+                'price': euler_price,
+                'std_error': euler_std_error,
+                'time': euler_time
+            },
+            'milstein': {
+                'price': milstein_price,
+                'std_error': milstein_std_error,
+                'time': milstein_time
+            }
+        }
+
+    def control_variate_monte_carlo(self, S_heston, S_gbm, sigma, c=1.0):
+        """Task 3: Implement control variate Monte Carlo simulation"""
+        start_time = time()
+
+        # Calculate arithmetic average for Heston paths
+        arith_avg_heston = np.mean(S_heston[:, 1:], axis=1)
+        payoffs_heston = np.maximum(arith_avg_heston - self.K, 0)
+        
+        # Calculate geometric average for GBM paths
+        geo_avg_gbm = np.exp(np.mean(np.log(S_gbm[:, 1:]), axis=1))
+        payoffs_gbm = np.maximum(geo_avg_gbm - self.K, 0)
+        
+        # Calculate analytical price for geometric Asian option
+        geo_analytical_price = self.analytical_geometric_asian_price(sigma)
+        
+        # Apply control variate
+        cv_payoffs = payoffs_heston + c * (geo_analytical_price - np.exp(-self.r * self.T) * payoffs_gbm)
+        
+        # Calculate option prices
+        price_without_cv = np.exp(-self.r * self.T) * np.mean(payoffs_heston)
+        price_with_cv = np.mean(cv_payoffs)
+        
+        # Calculate standard errors
+        std_error_without_cv = np.exp(-self.r * self.T) * np.std(payoffs_heston) / np.sqrt(self.M)
+        std_error_with_cv = np.std(cv_payoffs) / np.sqrt(self.M)
+        
+        # Calculate optimal control variate coefficient
+        cov_matrix = np.cov(payoffs_heston, payoffs_gbm)
+        optimal_c = cov_matrix[0, 1] / np.var(payoffs_gbm)
+        
+        # Apply optimal control variate
+        optimal_cv_payoffs = payoffs_heston + optimal_c * (geo_analytical_price - np.exp(-self.r * self.T) * payoffs_gbm)
+        price_with_optimal_cv = np.mean(optimal_cv_payoffs)
+        std_error_with_optimal_cv = np.std(optimal_cv_payoffs) / np.sqrt(self.M)
+
+        var_plain = np.var(np.exp(-self.r * self.T) * payoffs_heston)
+        var_cv = np.var(cv_payoffs)
+        var_optimal_cv = np.var(optimal_cv_payoffs)
+        
+        # Calculate variance reduction factors
+        vr_factor_c1 = (std_error_without_cv / std_error_with_cv) ** 2
+        vr_factor_optimal = (std_error_without_cv / std_error_with_optimal_cv) ** 2
+        
+        end_time = time()
+        computation_time = end_time - start_time
+        
+        results = {
+            'price_without_cv': price_without_cv,
+            'std_error_without_cv': std_error_without_cv,
+            'price_with_cv': price_with_cv,
+            'std_error_with_cv': std_error_with_cv,
+            'price_with_optimal_cv': price_with_optimal_cv,
+            'std_error_with_optimal_cv': std_error_with_optimal_cv,
+            'geo_analytical_price': geo_analytical_price,
+            'control_coefficient_c': c,
+            'optimal_control_coefficient': optimal_c,
+            'variance_plain': var_plain,
+            'variance_cv': var_cv,
+            'variance_optimal_cv': var_optimal_cv,
+            'variance_reduction_factor_c1': vr_factor_c1,
+            'variance_reduction_factor_optimal': vr_factor_optimal,
+            'computation_time': computation_time
+        }
+        
+        return results
+    
+    def experiment_varying_paths(self, sigma, path_counts):
+            """Task 4a: Evaluate performance with varying numbers of simulation paths"""
+            results = {
+                'paths': path_counts,
+                'price_without_cv': [],
+                'std_error_without_cv': [],
+                'price_with_cv': [],
+                'std_error_with_cv': [],
+                'price_with_optimal_cv': [],
+                'std_error_with_optimal_cv': [],
+                'variance_reduction_factor_c1': [],
+                'variance_reduction_factor_optimal': [],
+                'computation_time': []
+            }
+            
+            original_M = self.M
+            
+            for M in path_counts:
+                self.M = M
+                cv_results = self.control_variate_monte_carlo(self.generate_paths()[0], self.generate_gbm_paths(sigma), sigma)
+                
+                results['price_without_cv'].append(cv_results['price_without_cv'])
+                results['std_error_without_cv'].append(cv_results['std_error_without_cv'])
+                results['price_with_cv'].append(cv_results['price_with_cv'])
+                results['std_error_with_cv'].append(cv_results['std_error_with_cv'])
+                results['price_with_optimal_cv'].append(cv_results['price_with_optimal_cv'])
+                results['std_error_with_optimal_cv'].append(cv_results['std_error_with_optimal_cv'])
+                results['variance_reduction_factor_c1'].append(cv_results['variance_reduction_factor_c1'])
+                results['variance_reduction_factor_optimal'].append(cv_results['variance_reduction_factor_optimal'])
+                results['computation_time'].append(cv_results['computation_time'])
+            
+            # Restore original M
+            self.M = original_M
+            
+            return results
+
+    def experiment_averaging_frequency(self, sigma, frequencies):
+        """Task 4c: Explore impact of averaging frequency"""
+        results = {
+            'frequency': frequencies,
+            'price_without_cv': [],
+            'std_error_without_cv': [],
+            'price_with_cv': [],
+            'std_error_with_cv': [],
+            'variance_reduction_factor': []
+        }
+        
+        original_N = self.N
+        
+        for N in frequencies:
+            self.N = N
+            self.dt = self.T / N
+            
+            cv_results = self.control_variate_monte_carlo(self.generate_paths()[0], self.generate_gbm_paths(sigma), sigma)
+            
+            results['price_without_cv'].append(cv_results['price_without_cv'])
+            results['std_error_without_cv'].append(cv_results['std_error_without_cv'])
+            results['price_with_cv'].append(cv_results['price_with_optimal_cv'])
+            results['std_error_with_cv'].append(cv_results['std_error_with_optimal_cv'])
+            results['variance_reduction_factor'].append(cv_results['variance_reduction_factor_optimal'])
+        
+        # Restore original N
+        self.N = original_N
+        self.dt = self.T / self.N
+        
+        return results
+
+  

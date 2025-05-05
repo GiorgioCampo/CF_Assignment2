@@ -107,77 +107,118 @@ class HestonAsianOption:
         price = (self.S0 * np.exp((r_tilde - self.r)*self.T) * norm.cdf(d1)
                  - self.K * np.exp(-self.r*self.T) * norm.cdf(d2))
         return price
-    
-    def verify_with_gbm(self, sigma=None, analytic_arith=None):
-        """
-        Verify the Monte Carlo arithmetic-Asian implementation by collapsing Heston to GBM (ξ=0) and comparing
-        - MC arithmetic-Asian price under GBM
-        - Analytic geometric-Asian price (closed-form lower bound)
-        - Turnbull Wakeman lognormal approximation (benchmark for arithmetic-Asian)
+    # def analytical_geometric_asian_price(self, σ):
+    #     N = self.N; r = self.r; S0 = self.S0; K = self.K; T = self.T
+    #     # correct discrete Kemna–Vorst
+    #     σ_tilde = σ * np.sqrt((2*N+1)*(N+1)/(6*N**2))
+    #     r_tilde = (r - 0.5*σ**2)*(N+1)/(2*N) + 0.5*σ_tilde**2
 
-        Parameters:
-        sigma : float, optional
-            The constant volatility of the GBM. If None, uses sqrt(V0) so that the variance process v_t ≈ V0.
-        analytic_arith : float or None
-            If provided, uses this value as an external benchmark for the arithmetic-Asian price
-            instead of computing the Turnbull Wakeman approximation.
+    #     d1 = (np.log(S0/K) + (r_tilde+0.5*σ_tilde**2)*T)/(σ_tilde*np.sqrt(T))
+    #     d2 = d1 - σ_tilde*np.sqrt(T)
+    #     return ( S0 * np.exp((r_tilde-r)*T) * norm.cdf(d1)
+    #            - K  * np.exp(-r*T)            * norm.cdf(d2) )
 
-        Returns:
-        dict with keys:
-            mc_arithmetic_price, mc_arithmetic_std_error
-            analytic_geometric_price
-            turnbull_wakeman_approx
-        """
-        # 1. Choose GBM volatility: either user-supplied or sqrt(initial variance)
-        if sigma is None:
-            sigma = np.sqrt(self.V0)
+    def verify_with_gbm(self, σ=None):
+        if σ is None: σ = np.sqrt(self.V0)
+        # 1) MC arithmetic under GBM
+        orig = self.xi; self.xi=0.0
+        C_MC, se, _ = self.price_arithmetic_asian_option()
+        self.xi=orig
 
-        # Temporarily set xi=0 to collapse Heston to constant-vol GBM
-        orig_xi = self.xi
-        self.xi = 0.0
+        # 2) corrected geometric lower bound
+        C_geo = self.analytical_geometric_asian_price(σ)
 
-        # Monte Carlo price of arithmetic-Asian under GBM
-        mc_price, mc_std_error, _ = self.price_arithmetic_asian_option()
-
-        # Restore original xi
-        self.xi = orig_xi
-
-        # 2. Analytic geometric-Asian price (closed-form lower bound)
-        geo_price = self.analytical_geometric_asian_price(sigma)
-
-        # 3. Turnbull–Wakeman log-normal approximation for arithmetic-Asian (benchmark)
-        if analytic_arith is None:
-            # monitoring times t_i = i*dt, i=1..N
-            dt = self.T / self.N
-            times = np.linspace(dt, self.T, self.N)
-            # expected arithmetic average and variance under GBM
-            exp_rt = np.exp((self.r - 0.5*sigma**2) * times)
-            meanA = (self.S0 / self.N) * np.sum(exp_rt)
-            second_moment = (self.S0**2 / self.N**2) * np.sum(
-                np.exp(2*(self.r) * times) * (np.exp(sigma**2 * times) - 1)
-            ) + meanA**2
-            varA = second_moment - meanA**2
-            # lognormal parameters for A
-            muA = np.log(meanA**2 / np.sqrt(varA + meanA**2))
-            sigmaA = np.sqrt(np.log(1 + varA / meanA**2))
-            # Black–Scholes on average A
-            from scipy.stats import norm
-            d1 = (muA - np.log(self.K) + sigmaA**2) / sigmaA
-            d2 = d1 - sigmaA
-            C_TW = np.exp(-self.r * self.T) * (
-                np.exp(muA + 0.5 * sigmaA**2) * norm.cdf(d1)
-                - self.K * norm.cdf(d2)
-            )
-            tw_price = C_TW
-        else:
-            tw_price = analytic_arith
+        # 3) corrected TW: include covariances
+        dt = self.T/self.N
+        times = np.linspace(dt, self.T, self.N)
+        # build full Cov matrix
+        Ti,Tj = np.meshgrid(times, times)
+        Cov = (self.S0**2) * np.exp(self.r*(Ti+Tj)) * (np.exp(σ**2 * np.minimum(Ti,Tj)) - 1)
+        varA = Cov.sum() / (self.N**2)
+        mA   = self.S0 * np.mean(np.exp(self.r*times))
+        μA   = np.log(mA**2/np.sqrt(mA**2+varA))
+        σA   = np.sqrt(np.log(1 + varA/mA**2))
+        d1   = (μA - np.log(self.K))/σA + σA
+        d2   = d1 - σA
+        C_TW = np.exp(-self.r*self.T)*(np.exp(μA+0.5*σA**2)*norm.cdf(d1) - self.K*norm.cdf(d2))
 
         return {
-            'mc_arithmetic_price': mc_price,
-            'mc_arithmetic_std_error': mc_std_error,
-            'analytic_geometric_price': geo_price,
-            'turnbull_wakeman_approx': tw_price
-        }
+          'mc_arithmetic_price': C_MC,
+          'mc_arithmetic_std_error': se,
+          'analytic_geometric_price': C_geo,
+          'turnbull_wakeman_approx': C_TW
+         }
+    
+    # def verify_with_gbm(self, sigma=None, analytic_arith=None):
+    #     """
+    #     Verify the Monte Carlo arithmetic-Asian implementation by collapsing Heston to GBM (ξ=0) and comparing
+    #     - MC arithmetic-Asian price under GBM
+    #     - Analytic geometric-Asian price (closed-form lower bound)
+    #     - Turnbull Wakeman lognormal approximation (benchmark for arithmetic-Asian)
+
+    #     Parameters:
+    #     sigma : float, optional
+    #         The constant volatility of the GBM. If None, uses sqrt(V0) so that the variance process v_t ≈ V0.
+    #     analytic_arith : float or None
+    #         If provided, uses this value as an external benchmark for the arithmetic-Asian price
+    #         instead of computing the Turnbull Wakeman approximation.
+
+    #     Returns:
+    #     dict with keys:
+    #         mc_arithmetic_price, mc_arithmetic_std_error
+    #         analytic_geometric_price
+    #         turnbull_wakeman_approx
+    #     """
+    #     # 1. Choose GBM volatility: either user-supplied or sqrt(initial variance)
+    #     if sigma is None:
+    #         sigma = np.sqrt(self.V0)
+
+    #     # Temporarily set xi=0 to collapse Heston to constant-vol GBM
+    #     orig_xi = self.xi
+    #     self.xi = 0.0
+
+    #     # Monte Carlo price of arithmetic-Asian under GBM
+    #     mc_price, mc_std_error, _ = self.price_arithmetic_asian_option()
+
+    #     # Restore original xi
+    #     self.xi = orig_xi
+
+    #     # 2. Analytic geometric-Asian price (closed-form lower bound)
+    #     geo_price = self.analytical_geometric_asian_price(sigma)
+
+    #     # 3. Turnbull–Wakeman log-normal approximation for arithmetic-Asian (benchmark)
+    #     if analytic_arith is None:
+    #         # monitoring times t_i = i*dt, i=1..N
+    #         dt = self.T / self.N
+    #         times = np.linspace(dt, self.T, self.N)
+    #         # expected arithmetic average and variance under GBM
+    #         exp_rt = np.exp((self.r - 0.5*sigma**2) * times)
+    #         meanA = (self.S0 / self.N) * np.sum(exp_rt)
+    #         second_moment = (self.S0**2 / self.N**2) * np.sum(
+    #             np.exp(2*(self.r) * times) * (np.exp(sigma**2 * times) - 1)
+    #         ) + meanA**2
+    #         varA = second_moment - meanA**2
+    #         # lognormal parameters for A
+    #         muA = np.log(meanA**2 / np.sqrt(varA + meanA**2))
+    #         sigmaA = np.sqrt(np.log(1 + varA / meanA**2))
+    #         # Black–Scholes on average A
+    #         from scipy.stats import norm
+    #         d1 = (muA - np.log(self.K) + sigmaA**2) / sigmaA
+    #         d2 = d1 - sigmaA
+    #         C_TW = np.exp(-self.r * self.T) * (
+    #             np.exp(muA + 0.5 * sigmaA**2) * norm.cdf(d1)
+    #             - self.K * norm.cdf(d2)
+    #         )
+    #         tw_price = C_TW
+    #     else:
+    #         tw_price = analytic_arith
+
+    #     return {
+    #         'mc_arithmetic_price': mc_price,
+    #         'mc_arithmetic_std_error': mc_std_error,
+    #         'analytic_geometric_price': geo_price,
+    #         'turnbull_wakeman_approx': tw_price
+    #     }
 
 
     def compare_schemes(self):

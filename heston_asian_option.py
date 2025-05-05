@@ -93,40 +93,93 @@ class HestonAsianOption:
         return option_price, std_error, computation_time
 
     def analytical_geometric_asian_price(self, sigma):
-            """Task 2: Analytical pricing formula for geometric-average Asian call under BS model"""
-            N = self.N
-            
-            # Modified parameters for the geometric Asian option
-            # Formula based on Kemna & Vorst (1990)
-            sigma_adj = sigma * np.sqrt((2 * N + 1) / (6 * (N + 1)))
-            r_adj = self.r - 0.5 * sigma**2 + sigma_adj**2 / 2
-            
-            # Calculate d1 and d2
-            d1 = (np.log(self.S0 / self.K) + (r_adj + 0.5 * sigma_adj**2) * self.T) / (sigma_adj * np.sqrt(self.T))
-            # d2 = d1 - sigma_adj * np.sqrt(self.T)
-            d2 = (np.log(self.S0 / self.K) + (r_adj - 0.5 * sigma_adj**2) * self.T) / (sigma_adj * np.sqrt(self.T))
-            
-            # Black-Scholes formula for geometric Asian option
-            price = self.S0 * np.exp((r_adj - self.r) * self.T) * norm.cdf(d1) - self.K * np.exp(-self.r * self.T) * norm.cdf(d2)
-            
-            return price
-
-    def verify_with_gbm(self):
-            """Verify implementation by setting xi=0 (reduces to GBM) and comparing with BS model"""
-            # Save original xi
-            original_xi = self.xi
-            
-            # Set xi to 0 (reducing Heston to GBM)
-            self.xi = 0
-            
-            # Price using Heston implementation
-            heston_price, heston_std_error, _ = self.price_arithmetic_asian_option()
-            
-            # Restore original xi
-            self.xi = original_xi
-            
-            return heston_price, heston_std_error
+        """Task 2: Analytical pricing formula for discrete geometric-average Asian call under BS model (Kemna & Vorst)"""
+        N = self.N
+        # use the simpler Kemna & Vorst adjustment:
+        # sigma_tilde = sigma * sqrt((2N+1)/(6(N+1)))
+        sigma_tilde = sigma * np.sqrt((2*N + 1) / (6*(N + 1)))
+        # r_tilde = (r - 0.5*sigma^2) + 0.5*sigma_tilde^2
+        r_tilde = (self.r - 0.5*sigma**2) + 0.5*sigma_tilde**2
+        # d1 and d2 as per formula
+        d1 = (np.log(self.S0/self.K) + (r_tilde + 0.5*sigma_tilde**2)*self.T) / (sigma_tilde * np.sqrt(self.T))
+        d2 = (np.log(self.S0/self.K) + (r_tilde - 0.5*sigma_tilde**2)*self.T) / (sigma_tilde * np.sqrt(self.T))
+        # closed-form geometric-Asian price
+        price = (self.S0 * np.exp((r_tilde - self.r)*self.T) * norm.cdf(d1)
+                 - self.K * np.exp(-self.r*self.T) * norm.cdf(d2))
+        return price
     
+    def verify_with_gbm(self, sigma=None, analytic_arith=None):
+        """
+        Verify the Monte Carlo arithmetic-Asian implementation by collapsing Heston to GBM (ξ=0) and comparing
+        - MC arithmetic-Asian price under GBM
+        - Analytic geometric-Asian price (closed-form lower bound)
+        - Turnbull Wakeman lognormal approximation (benchmark for arithmetic-Asian)
+
+        Parameters:
+        sigma : float, optional
+            The constant volatility of the GBM. If None, uses sqrt(V0) so that the variance process v_t ≈ V0.
+        analytic_arith : float or None
+            If provided, uses this value as an external benchmark for the arithmetic-Asian price
+            instead of computing the Turnbull Wakeman approximation.
+
+        Returns:
+        dict with keys:
+            mc_arithmetic_price, mc_arithmetic_std_error
+            analytic_geometric_price
+            turnbull_wakeman_approx
+        """
+        # 1. Choose GBM volatility: either user-supplied or sqrt(initial variance)
+        if sigma is None:
+            sigma = np.sqrt(self.V0)
+
+        # Temporarily set xi=0 to collapse Heston to constant-vol GBM
+        orig_xi = self.xi
+        self.xi = 0.0
+
+        # Monte Carlo price of arithmetic-Asian under GBM
+        mc_price, mc_std_error, _ = self.price_arithmetic_asian_option()
+
+        # Restore original xi
+        self.xi = orig_xi
+
+        # 2. Analytic geometric-Asian price (closed-form lower bound)
+        geo_price = self.analytical_geometric_asian_price(sigma)
+
+        # 3. Turnbull–Wakeman log-normal approximation for arithmetic-Asian (benchmark)
+        if analytic_arith is None:
+            # monitoring times t_i = i*dt, i=1..N
+            dt = self.T / self.N
+            times = np.linspace(dt, self.T, self.N)
+            # expected arithmetic average and variance under GBM
+            exp_rt = np.exp((self.r - 0.5*sigma**2) * times)
+            meanA = (self.S0 / self.N) * np.sum(exp_rt)
+            second_moment = (self.S0**2 / self.N**2) * np.sum(
+                np.exp(2*(self.r) * times) * (np.exp(sigma**2 * times) - 1)
+            ) + meanA**2
+            varA = second_moment - meanA**2
+            # lognormal parameters for A
+            muA = np.log(meanA**2 / np.sqrt(varA + meanA**2))
+            sigmaA = np.sqrt(np.log(1 + varA / meanA**2))
+            # Black–Scholes on average A
+            from scipy.stats import norm
+            d1 = (muA - np.log(self.K) + sigmaA**2) / sigmaA
+            d2 = d1 - sigmaA
+            C_TW = np.exp(-self.r * self.T) * (
+                np.exp(muA + 0.5 * sigmaA**2) * norm.cdf(d1)
+                - self.K * norm.cdf(d2)
+            )
+            tw_price = C_TW
+        else:
+            tw_price = analytic_arith
+
+        return {
+            'mc_arithmetic_price': mc_price,
+            'mc_arithmetic_std_error': mc_std_error,
+            'analytic_geometric_price': geo_price,
+            'turnbull_wakeman_approx': tw_price
+        }
+
+
     def compare_schemes(self):
         """Compare Euler and Milstein schemes"""
         # Save original scheme
